@@ -1,0 +1,7 @@
+numpy
+torch
+transformers<5
+pyarrow
+scipy
+scikit-learn
+tqdm
