@@ -33,8 +33,8 @@ class HuggingfaceCollaterFunc:
                 return_tensors='pt', max_length=self.seqMaxLen,
                 padding='longest', truncation=True, return_token_type_ids=False
             )
-            mat = np.stack([self._as_vec(i["y"]) for i in data], axis=0)  # [B,1280]
-            tokenizedLabArr = torch.from_numpy(mat).float()               # CPU float32
+            mat = np.stack([self._as_vec(i["y"]) for i in data], axis=0)
+            tokenizedLabArr = torch.from_numpy(mat).float()
             return {
                 'tokenizedSeqAArr': tokenizedSeqAArr,
                 'tokenizedSeqBArr': tokenizedSeqBArr,

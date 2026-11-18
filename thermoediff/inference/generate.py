@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""Generate protein candidates using diffusion and fixed-budget decoding."""
-
 from __future__ import annotations
 
 import argparse
@@ -14,14 +9,14 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer
 
-from model import AlignDiff
+from thermoediff.models.diffusion import AlignDiff
 
 
 AA20 = list("ACDEFGHIKLMNPQRSTVWY")
 
 
 def _dict_to_device(batch: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
-    """Move a nested structure (dict / BatchEncoding / tensors) to device."""
+
     from collections.abc import Mapping
 
     out: Dict[str, Any] = {}
@@ -40,9 +35,8 @@ def _dict_to_device(batch: Dict[str, Any], device: torch.device) -> Dict[str, An
 
 @torch.no_grad()
 def _meanpool_residue_repr(esm_model: torch.nn.Module, tokenizer, seqs: List[str], max_len: int) -> torch.Tensor:
-    """
-    Mean-pool ESM last_hidden_state over residue tokens (drop CLS and EOS).
-    """
+
+
     tok = tokenizer(
         seqs,
         return_tensors="pt",
@@ -54,28 +48,27 @@ def _meanpool_residue_repr(esm_model: torch.nn.Module, tokenizer, seqs: List[str
     dev = next(esm_model.parameters()).device
     tok = {k: v.to(dev) for k, v in tok.items()}
 
-    hs = esm_model(**tok).last_hidden_state  # (B, L, C)
+    hs = esm_model(**tok).last_hidden_state
 
-    attn = tok["attention_mask"].bool()      # (B, L)
-    attn[:, 0] = False  # drop CLS
+    attn = tok["attention_mask"].bool()
+    attn[:, 0] = False
 
-    lengths = tok["attention_mask"].sum(dim=1)  # includes CLS+EOS
+    lengths = tok["attention_mask"].sum(dim=1)
     eos_idx = (lengths - 1).clamp(min=0)
     batch_idx = torch.arange(attn.shape[0], device=dev)
-    attn[batch_idx, eos_idx] = False  # drop EOS
+    attn[batch_idx, eos_idx] = False
 
     denom = attn.sum(dim=1).clamp(min=1).unsqueeze(-1)
     pooled = (hs * attn.unsqueeze(-1)).sum(dim=1) / denom
-    return pooled  # (B, C)
+    return pooled
 
 
 @torch.no_grad()
 def compute_y_ab(backbone: AlignDiff, tokenizer, seq_a: str, seq_b: str, max_len: int) -> torch.Tensor:
-    """
-    y = meanpool(B) - meanpool(A), returned on CPU (1280,)
-    """
+
+
     esm = backbone.embedder.esm
-    rep = _meanpool_residue_repr(esm, tokenizer, [seq_a, seq_b], max_len=max_len)  # (2,1280)
+    rep = _meanpool_residue_repr(esm, tokenizer, [seq_a, seq_b], max_len=max_len)
     y = rep[1] - rep[0]
     return y.float().detach().cpu()
 
@@ -84,7 +77,7 @@ def load_checkpoint(backbone: AlignDiff, ckpt_path: Path, device: torch.device) 
     ckpt = torch.load(str(ckpt_path), map_location="cpu")
     state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
 
-    # strip DDP "module."
+
     if isinstance(state, dict) and any(k.startswith("module.") for k in state.keys()):
         state = {k.replace("module.", "", 1): v for k, v in state.items()}
 
@@ -94,9 +87,8 @@ def load_checkpoint(backbone: AlignDiff, ckpt_path: Path, device: torch.device) 
 
 
 def get_aa20_ids(tokenizer) -> List[int]:
-    """
-    Get token ids for AA20 single-letter tokens in the tokenizer vocab.
-    """
+
+
     aa_ids = []
     for a in AA20:
         tid = tokenizer.convert_tokens_to_ids(a)
@@ -107,30 +99,28 @@ def get_aa20_ids(tokenizer) -> List[int]:
 
 
 def residue_positions(attn_mask_1d: torch.Tensor) -> torch.Tensor:
-    """
-    Return residue indices (exclude CLS and EOS) based on attention_mask.
-    """
-    idx = attn_mask_1d.nonzero(as_tuple=False).squeeze(-1)  # valid token positions
+
+
+    idx = attn_mask_1d.nonzero(as_tuple=False).squeeze(-1)
     if idx.numel() < 2:
         return torch.empty(0, dtype=torch.long)
-    return idx[1:-1]  # drop CLS and EOS
+    return idx[1:-1]
 
 
 def ids_to_seq_aa20(tokenizer, ids_1d: torch.Tensor, attn_mask_1d: torch.Tensor) -> str:
-    """
-    Decode residue token ids into AA20 string. Assumes ids already restricted to AA20.
-    """
+
+
     pos = residue_positions(attn_mask_1d)
     if pos.numel() == 0:
         return ""
     toks = tokenizer.convert_ids_to_tokens(ids_1d[pos].tolist())
-    # safe: only accept AA20
+
     out = []
     for t in toks:
         if len(t) == 1 and t in AA20:
             out.append(t)
         else:
-            # if something unexpected appears, drop it (or you can assert)
+
             return ""
     return "".join(out)
 
@@ -143,43 +133,41 @@ def sample_from_logits_aa20(
     top_p: float,
     generator: Optional[torch.Generator] = None,
 ) -> int:
-    """
-    Sample one AA20 token id from logits over vocab, restricted to AA20.
-    Supports temperature + top-k + nucleus(top-p) sampling in AA20 space.
-    """
-    aa_logits = logits_1d[aa20_ids]  # (20,)
+
+
+    aa_logits = logits_1d[aa20_ids]
     t = max(float(temperature), 1e-6)
     aa_logits = aa_logits / t
 
     probs = torch.softmax(aa_logits, dim=-1)
 
-    # top-k in AA20 space
+
     if top_k > 0 and top_k < probs.numel():
         vals, idxs = torch.topk(probs, k=top_k, dim=-1)
         probs2 = torch.zeros_like(probs)
         probs2[idxs] = vals
         probs = probs2 / probs2.sum()
 
-    # top-p (nucleus) in AA20 space
+
     if 0.0 < top_p < 1.0:
         sorted_probs, sorted_idx = torch.sort(probs, descending=True)
         cdf = torch.cumsum(sorted_probs, dim=-1)
         keep = cdf <= top_p
-        keep[0] = True  # always keep at least 1
+        keep[0] = True
         kept_idx = sorted_idx[keep]
         probs2 = torch.zeros_like(probs)
         probs2[kept_idx] = probs[kept_idx]
         probs = probs2 / probs2.sum()
 
-    # categorical sample
+
     sampled = torch.multinomial(probs, num_samples=1, generator=generator).item()
     return int(aa20_ids[sampled])
 
 
 def decode_candidate_edit_mode(
-    logits: torch.Tensor,                 # (L, V)
-    input_ids: torch.Tensor,              # (L,)
-    attn_mask: torch.Tensor,              # (L,)
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    attn_mask: torch.Tensor,
     tokenizer,
     aa20_ids: List[int],
     mut_k: int,
@@ -188,53 +176,46 @@ def decode_candidate_edit_mode(
     top_p: float,
     generator: Optional[torch.Generator] = None,
 ) -> str:
-    """
-    EDIT MODE (recommended):
-    - compute "gain" per residue position = best_alt_logit - logit(orig_aa)
-    - mutate only top-K positions with highest gain
-    - for each mutated position, sample a new AA20 (excluding original AA)
-    - all other positions are copied from original C
 
-    """
+
     pos = residue_positions(attn_mask)
     if pos.numel() == 0:
         return ""
 
-    # candidate ids start as copy of input
+
     cand_ids = input_ids.clone()
 
-    # restrict original to AA20 only; if original isn't AA20 at some pos, fail fast
-    # (you can also choose to skip those positions)
-    orig_ids = input_ids[pos]  # residue token ids
 
-    # Compute gain per position
+    orig_ids = input_ids[pos]
+
+
     gains = []
     for p in pos.tolist():
         orig_id = int(input_ids[p].item())
         if orig_id not in aa20_ids:
-            return ""  # ensure strict AA20 baseline
-        aa_logits = logits[p, aa20_ids]  # (20,)
+            return ""
+        aa_logits = logits[p, aa20_ids]
         orig_idx = aa20_ids.index(orig_id)
         orig_logit = aa_logits[orig_idx].item()
 
-        # best alternative (exclude orig)
+
         best_alt = torch.max(torch.cat([aa_logits[:orig_idx], aa_logits[orig_idx+1:]]))
         gain = float(best_alt.item() - orig_logit)
         gains.append(gain)
 
     gains_t = torch.tensor(gains, dtype=torch.float32)
-    # pick top mut_k positions
+
     K = int(mut_k)
     if not 0 <= K <= pos.numel():
         raise ValueError("Mutation count must be between zero and sequence length")
     if K == 0:
-        # no mutation, just copy
+
         return ids_to_seq_aa20(tokenizer, cand_ids, attn_mask)
 
     top_vals, top_idx = torch.topk(gains_t, k=K, largest=True)
-    mut_positions = pos[top_idx.to(pos.device)]  # positions in token space
+    mut_positions = pos[top_idx.to(pos.device)]
 
-    # Mutate these positions
+
     for p in mut_positions.tolist():
         orig_id = int(input_ids[p].item())
 
@@ -249,9 +230,9 @@ def decode_candidate_edit_mode(
 
 
 def decode_candidate_sample_mode(
-    logits: torch.Tensor,                 # (L, V)
-    input_ids: torch.Tensor,              # (L,)
-    attn_mask: torch.Tensor,              # (L,)
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    attn_mask: torch.Tensor,
     tokenizer,
     aa20_ids: List[int],
     temperature: float,
@@ -259,12 +240,8 @@ def decode_candidate_sample_mode(
     top_p: float,
     generator: Optional[torch.Generator] = None,
 ) -> str:
-    """
-    SAMPLE MODE:
-    - sample AA20 at every residue position independently
-    - strict AA20 output
-    More diverse, but can be noisier than edit mode.
-    """
+
+
     pos = residue_positions(attn_mask)
     if pos.numel() == 0:
         return ""
@@ -300,7 +277,7 @@ def main():
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=42)
 
-    # decoding controls
+
     ap.add_argument("--mode", type=str, default="edit", choices=["edit", "sample"])
     ap.add_argument("--mut_k", type=int, default=1, help="number of substitutions in edit mode")
     ap.add_argument("--temperature", type=float, default=1.0)
@@ -308,7 +285,7 @@ def main():
     ap.add_argument("--top_p", type=float, default=1.0, help="AA20 nucleus sampling (1 disables)")
     ap.add_argument("--max_rounds", type=int, default=5, help="max attempts to fill unique candidates per C")
 
-    # must match training hyperparams
+
     ap.add_argument("--inSize", type=int, default=1280)
     ap.add_argument("--tknNum", type=int, default=33)
     ap.add_argument("--L", type=int, default=2)
@@ -360,13 +337,13 @@ def main():
         item = plan[parent]
         A_seq = item["A"]["seq"]
         B_seq = item["B"]["seq"]
-        D_seq = item.get("D", item["A"])["seq"]  # unused compatibility placeholder
+        D_seq = item.get("D", item["A"])["seq"]
         c_list = item["C_list"]
 
         parent_dir = out_root / parent
         parent_dir.mkdir(parents=True, exist_ok=True)
 
-        y_ab = compute_y_ab(backbone, tokenizer, A_seq, B_seq, max_len=args.max_len)  # (1280,)
+        y_ab = compute_y_ab(backbone, tokenizer, A_seq, B_seq, max_len=args.max_len)
         print(f"[{p_i}/{len(parents)}] Parent={parent} | C_count={len(c_list)}")
 
         for c_j, c_item in enumerate(c_list, 1):
@@ -378,29 +355,29 @@ def main():
                 raise ValueError(f"{c_id}: target exceeds max_len; increase max_len")
             out_file = parent_dir / f"{c_id}.txt"
 
-            y_used = y_ab.unsqueeze(0)  # (1,1280)
+            y_used = y_ab.unsqueeze(0)
 
-            # maintain unique candidates
+
             generated: List[str] = []
             seen: Set[str] = set()
             rounds = 0
 
-            # we will keep sampling until we have args.num unique
+
             while len(generated) < args.num and rounds < args.max_rounds:
                 rounds += 1
 
                 cur = min(args.batch, args.num - len(generated))
-                # seed schedule: makes per-round stochasticity stable but varied
+
                 base_seed = args.seed + p_i * 100000 + c_j * 1000 + rounds
                 torch.manual_seed(base_seed)
                 np.random.seed(base_seed)
 
-                # torch Generator for multinomial sampling (optional)
+
                 g = torch.Generator(device=device)
                 g.manual_seed(base_seed + 999)
 
                 seqA_list = [C_seq] * cur
-                seqB_list = [D_seq] * cur  # placeholder for compatibility
+                seqB_list = [D_seq] * cur
 
                 tokA = tokenizer(
                     seqA_list,
@@ -424,14 +401,14 @@ def main():
                 data = {"tokenizedSeqAArr": tokA, "tokenizedSeqBArr": tokB, "tokenizedLabArr": y_batch}
                 data = _dict_to_device(data, device)
 
-                # diffusion sampling
+
                 res = backbone(data, T=args.steps)
-                logits_all = res["tkn_pre"]  # (B, L, V)
+                logits_all = res["tkn_pre"]
 
                 for k in range(cur):
-                    logits = logits_all[k]  # (L, V)
-                    input_ids = data["tokenizedSeqAArr"]["input_ids"][k]        # (L,)
-                    attn_mask = data["tokenizedSeqAArr"]["attention_mask"][k]   # (L,)
+                    logits = logits_all[k]
+                    input_ids = data["tokenizedSeqAArr"]["input_ids"][k]
+                    attn_mask = data["tokenizedSeqAArr"]["attention_mask"][k]
 
                     if args.mode == "edit":
                         seq = decode_candidate_edit_mode(
@@ -459,7 +436,7 @@ def main():
                             generator=g,
                         )
 
-                    # filter invalid / duplicates / empty
+
                     if not seq:
                         continue
                     if seq == C_seq:
@@ -475,7 +452,7 @@ def main():
 
             if len(generated) < args.num:
                 print(f"[WARN] {c_id}: generated {len(generated)}/{args.num} unique candidates")
-            # write output
+
             with open(out_file, "w", encoding="utf-8") as fw:
                 fw.write(f"# parent: {parent}\n")
                 fw.write(f"# A_id: {item['A']['id']}\n# B_id: {item['B']['id']}\n# D_id: {item.get('D', item['A'])['id']}\n")

@@ -20,13 +20,13 @@ def lgb_precision(preds, dtrain):
     return 'precision', float(Counter(Y==Y_pre)[True]/len(Y)), True
 
 import scipy
-# from scipy.stats import spearmanr,pearsonr
+
 class Metrictor:
     def __init__(self, batchList=False, contrastLearn=False, affinityFloor=None):
-        self._reporter_ = {"MSE":self.MSE, "MAE":self.MAE, "Pearson":self.Pearson, "ACC":self.ACC, 
+        self._reporter_ = {"MSE":self.MSE, "MAE":self.MAE, "Pearson":self.Pearson, "ACC":self.ACC,
                            "CrossEntropyLOSS":self.CrossEntropyLOSS,
                            "ScipyPearsonr":self.ScipyPearsonr, "ScipySpearmanr":self.ScipySpearmanr,
-                           "RANK_SCORE":self.RANK_SCORE, 
+                           "RANK_SCORE":self.RANK_SCORE,
                            "AF_AUROC":self.AF_AUROC, "AF_AUPRC":self.AF_AUPRC,
                            "ProtPearson":self.ProtPearson, "ProtPearsonForPos":self.ProtPearsonForPos,
                            "wProtPearson":self.wProtPearson, "wProtPearsonForPos":self.wProtPearsonForPos,
@@ -43,7 +43,7 @@ class Metrictor:
             res[mtc] = v
         print(end=end)
         return res
-    
+
     def set_data(self, res):
         self.Y = res['y_true']
         self.Y_pre = res['y_prob']
@@ -73,7 +73,7 @@ class Metrictor:
         return scipy.stats.pearsonr(self.Y_pre, self.Y)[0]
     def ScipySpearmanr(self):
         return scipy.stats.spearmanr(self.Y_pre, self.Y)[0]
-    
+
     def ACC(self):
         if self.affinityFloor is None:
             if self.batchList:
@@ -85,8 +85,8 @@ class Metrictor:
             return np.sum([ACC(yp>0.5, yt>self.affinityFloor, pad)*np.sum(pad) for yp,yt,pad in zip(self.Y_pre,self.Y,self.maskPAD)]) / np.sum([pad.sum() for pad in self.maskPAD])
         else:
             return ACC(self.Y_pre>0.5, self.Y>self.affinityFloor, self.maskPAD)
-    # def AUC(self):
-    #     return AUC(self.Y_prob_pre,self.Y)
+
+
     def CrossEntropyLOSS(self):
         return CrossEntropyLOSS(self.Y_prob_pre,self.Y)
     def MSE(self):
@@ -107,14 +107,14 @@ class Metrictor:
     def AF_AUROC(self):
         yt = self.Y[self.Y!=self.Y[0]]
         yp = self.Y_pre[self.Y!=self.Y[0]]
-        
+
         yt = np.array(yt>self.Y[0], dtype=np.int32)
         yp = (yp-yp.min())/(yp.max()-yp.min())
         return skmetrics.roc_auc_score(yt, yp)
     def AF_AUPRC(self):
         yt = self.Y[self.Y!=self.Y[0]]
         yp = self.Y_pre[self.Y!=self.Y[0]]
-        
+
         yt = np.array(yt>self.Y[0], dtype=np.int32)
         yp = (yp-yp.min())/(yp.max()-yp.min())
         return skmetrics.average_precision_score(yt, yp)
@@ -148,18 +148,14 @@ class Metrictor:
         return skmetrics.calinski_harabasz_score(self.Y_pre, self.Y)
     def CI(self):
         return CI(self.Y_pre, self.Y)
-    # def pMLM(self):
-    #     return LOSS(self.pSeqArrPre,self.pSeqArr)
-    # def dMLM(self):
-    #     return LOSS(self.dSeqArrPre,self.dSeqArr)
+
 
 def sigmoid(x):
     return 1/(1+np.exp(-x))
 
 def ACC(Y_pre, Y, maskPAD=None):
-    # print(Y_pre)
-    # print(Y)
-    # print()
+
+
     if maskPAD is None:
         return (Y_pre==Y).sum() / len(Y)
     else:
@@ -171,9 +167,9 @@ def AUC(Y_prob_pre, Y):
 def CrossEntropyLOSS(Y_prob_pre, Y):
     Y_prob_pre[Y_prob_pre>0.99] -= 1e-3
     Y_prob_pre[Y_prob_pre<0.01] += 1e-3
-    #return -np.mean(Y*np.log(Y_prob_pre) + (1-Y)*np.log(1-Y_prob_pre))
+
     return -np.mean(np.log(Y_prob_pre[range(len(Y)),Y]))
-    
+
 def MSE(Y_pre, Y):
     return np.mean((Y_pre-Y)**2)
 
@@ -182,20 +178,20 @@ def MAE(Y_pre, Y):
 
 def RANK_SCORE(yp, yt, maskPAD=None):
     yp,yt = np.array(yp),np.array(yt)
-    # yp, yt: batchSize (× rankingNum); maskPAD: batchSize (× rankingNum)
+
     if len(yp.shape)==1:
         x_ = yp.reshape(1,-1) - yp.reshape(-1,1)
         y_ = yt.reshape(1,-1) - yt.reshape(-1,1)
-        
+
         x_[x_>0] = y_[y_>0] = 1
         x_[x_<0] = y_[y_<0] = -1
-    
+
         return (x_==y_).sum() / len(yp)**2
     else:
         B,R = yp.shape
 
-        x_ = yp.reshape(B,1,-1) - yp.reshape(B,-1,1) # => batchSize × rankingNum × rankingNum
-        y_ = yt.reshape(B,1,-1) - yt.reshape(B,-1,1) # => batchSize × rankingNum × rankingNum
+        x_ = yp.reshape(B,1,-1) - yp.reshape(B,-1,1)
+        y_ = yt.reshape(B,1,-1) - yt.reshape(B,-1,1)
 
         x_[x_>0] = y_[y_>0] = 1
         x_[x_<0] = y_[y_<0] = -1
@@ -203,14 +199,14 @@ def RANK_SCORE(yp, yt, maskPAD=None):
         if maskPAD is None:
             return (x_==y_).sum() / (B*R**2)
         else:
-            maskPAD = maskPAD.reshape(B,1,-1) & maskPAD.reshape(B,-1,1) # => batchSize × rankingNum × rankingNum
+            maskPAD = maskPAD.reshape(B,1,-1) & maskPAD.reshape(B,-1,1)
             maskPAD[:,range(R),range(R)] = False
             return ((x_==y_)*maskPAD).sum() / maskPAD.sum()
 
-# from scipy.stats import stats
+
 def Pearson(yp, yt, maskPAD=None, affinityFloor=None):
     yp,yt = np.array(yp),np.array(yt)
-    # yp, yt: batchSize (× rankingNum); maskPAD: batchSize (× rankingNum)
+
     if len(yp.shape)==1 or maskPAD is None:
         if affinityFloor is not None:
             yp,yt = yp[yt>affinityFloor],yt[yt>affinityFloor]
@@ -233,7 +229,7 @@ def IE(yt):
 
 def wPearson(yp, yt, maskPAD=None,affinityFloor=None, reduction='mean'):
     yp,yt = np.array(yp),np.array(yt)
-    # yp, yt: batchSize × rankingNum; maskPAD: batchSize × rankingNum
+
     if maskPAD is None:
         maskPAD = np.ones(yt.shape, dtype=np.bool)
     if affinityFloor is not None:
@@ -243,7 +239,7 @@ def wPearson(yp, yt, maskPAD=None,affinityFloor=None, reduction='mean'):
     for a,b,mask in zip(yp,yt,maskPAD):
         a,b = a[mask],b[mask]
         if len(a)>1:
-            # w = np.sum([np.log(i) for i in range(1,len(a)+1)])
+
             w = IE(b)
             tmp += w*pearsonr(a,b)
             cnt += w
@@ -267,27 +263,3 @@ def CI(yp,yt):
     yp_diff,yt_diff = np.triu(yp_diff,1),np.triu(yt_diff,1)
     tmp = yp_diff[yt_diff>0].reshape(-1)
     return (1.0*(tmp>0).sum() + 0.5*(tmp==0).sum()) / len(tmp)
-
-# def CI(yp,yt):
-#     y,f = yt,yp
-#     ind = np.argsort(y)
-#     y = y[ind]
-#     f = f[ind]
-#     i = len(y)-1
-#     j = i-1
-#     z = 0.0
-#     S = 0.0
-#     while i > 0:
-#         while j >= 0:
-#             if y[i] > y[j]:
-#                 z = z+1
-#                 u = f[i] - f[j]
-#                 if u > 0:
-#                     S = S + 1
-#                 elif u == 0:
-#                     S = S + 0.5
-#             j = j - 1
-#         i = i - 1
-#         j = i-1
-#     ci = S/z
-#     return ci

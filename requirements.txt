@@ -5,3 +5,5 @@ pyarrow
 scipy
 scikit-learn
 tqdm
+duckdb
+parasail

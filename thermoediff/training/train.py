@@ -1,4 +1,3 @@
-# train_AlignDiff_ddp.py
 import os
 import glob
 import random
@@ -12,10 +11,10 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import get_worker_info
 
-from collate import HuggingfaceCollaterFunc
-from model import AlignDiff
-from training import SequenceDiff
-from stream_dataset import ParquetStreamPairs
+from thermoediff.data.collate import HuggingfaceCollaterFunc
+from thermoediff.models.diffusion import AlignDiff
+from thermoediff.training.trainer import SequenceDiff
+from thermoediff.data.stream_dataset import ParquetStreamPairs
 
 
 def set_seed(seed: int):
@@ -27,9 +26,8 @@ def set_seed(seed: int):
 
 
 def ddp_setup():
-    """
-    Return: (ddp_enabled, local_rank, rank, world_size)
-    """
+
+
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         dist.init_process_group(backend="nccl", init_method="env://",timeout=timedelta(hours=5))
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -38,7 +36,7 @@ def ddp_setup():
         world_size = dist.get_world_size()
         return True, local_rank, rank, world_size
     else:
-        # allow single-process debug run: python train_AlignDiff_ddp.py
+
         return False, 0, 0, 1
 
 
@@ -55,37 +53,36 @@ def estimate_num_rows(shard_glob: str) -> int:
     files = sorted(glob.glob(shard_glob))
     if not files:
         raise FileNotFoundError(f"No parquet shards matched: {shard_glob}")
-    # 只读 footer metadata，速度很快
+
     return sum(pq.ParquetFile(f).metadata.num_rows for f in files)
 
 
-# train_AlignDiff_ddp.py 里加在顶部 import 区域
 import random
 
 class DDPParquetStreamPairs(ParquetStreamPairs):
     def __iter__(self):
-        # rank/world_size
+
         rank, world_size = 0, 1
         if dist.is_available() and dist.is_initialized():
             rank = dist.get_rank()
             world_size = dist.get_world_size()
 
-        # worker_id/num_workers
+
         wi = get_worker_info()
         worker_id, num_workers = (wi.id, wi.num_workers) if wi is not None else (0, 1)
 
         global_worker_id = rank * num_workers + worker_id
         global_num_workers = world_size * num_workers
 
-        # 我负责的文件列表
+
         my_files = [f for file_idx, f in enumerate(self.files)
                     if (file_idx % global_num_workers) == global_worker_id]
 
-        # 理论上 19 个文件、world=4、workers=2 时不会为空；但加上保护更稳
+
         if not my_files:
             return iter(())
 
-        # 让每个 (rank, worker) 有稳定但不同的 shuffle
+
         rng = random.Random(self.seed + 10007 * global_worker_id)
 
         def gen_once():
@@ -105,41 +102,41 @@ class DDPParquetStreamPairs(ParquetStreamPairs):
                 rng.shuffle(my_files)
                 yield from gen_once()
 
-        # 只让 train 无限；valid 只跑一遍（否则验证永远结束不了）
+
         return gen_train_infinite() if (self.split == "train") else gen_once()
 
 
 if __name__ == "__main__":
-    # ========= DDP init =========
+
     ddp_enabled, local_rank, rank, world_size = ddp_setup()
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
-    # ========= 基础配置 =========
+
     SEED = 9527
     set_seed(SEED + rank)
 
-    # 你的 shards 路径（改成真实路径）
-    shards = "learn2therm/l2t_train/train_*.parquet"
+
+    shards = "data/l2t_train/train_*.parquet"
     split_ratio = 0.9
 
-    # 训练超参
+
     bertDir = "facebook/esm2_t33_650M_UR50D"
     seqMaxLen = 512
 
-    # 重要：这里的 bs 是“每张卡/每个进程”的 batch size
-    bs_per_gpu = 64            # 如果你单卡是 64，4 卡保持全局 batch 不变，就设 16
+
+    bs_per_gpu = 64
     epochs = 8
     wd = 0.001
     lr = 4e-4
     warmupRatio = 0.02
     earlyStop = 10**9
 
-    # DataLoader 相关（每个进程的 worker 数）
-    dataLoadNumWorkers = 2     # 4 卡总 worker=8；先稳妥跑通，再视 I/O 调大
+
+    dataLoadNumWorkers = 2
     prefetchFactor = 4
     pinMemory = True
 
-    # ========= 1) 数据集（流式+切分） =========
+
     trainDS = DDPParquetStreamPairs(
         shards, split="train", split_ratio=split_ratio, seed=SEED, batch_rows=2048
     )
@@ -149,7 +146,6 @@ if __name__ == "__main__":
 )
 
 
-    # ========= 2) steps/epoch / evalSteps / maxSteps（按全局 batch 计算） =========
     if is_main_process(ddp_enabled, rank):
         N_total = estimate_num_rows(shards)
     else:
@@ -165,7 +161,7 @@ if __name__ == "__main__":
     steps_per_epoch = max(1, N_train // global_bs)
 
     evalSteps = steps_per_epoch
-    #maxSteps = evalSteps * epochs
+
     maxSteps = evalSteps * epochs
     warmupSteps = int(maxSteps * warmupRatio)
 
@@ -177,7 +173,7 @@ if __name__ == "__main__":
         print(f"[INFO] steps/epoch≈{steps_per_epoch:,}, epochs={epochs}")
         print(f"[INFO] evalSteps={evalSteps:,}, maxSteps={maxSteps:,}, warmupSteps={warmupSteps:,}")
 
-    # ========= 3) collater / 模型 / 优化器 =========
+
     collater = HuggingfaceCollaterFunc(bertDir, seqMaxLen=seqMaxLen)
 
     backbone = AlignDiff(
@@ -189,7 +185,7 @@ if __name__ == "__main__":
         std=0.27595767
     ).to(device)
 
-    # 冻结 ESM backbone
+
     for p in backbone.embedder.parameters():
         p.requires_grad = False
 
@@ -209,14 +205,14 @@ if __name__ == "__main__":
     )
 
     AMP = True
-    # 兼容：有的版本 SequenceDiff 没有 DDP 形参，就手动挂属性
+
     try:
         model = SequenceDiff(model=backbone, optimizer=optimizer, collateFunc=collater, AMP=AMP, DDP=ddp_enabled)
     except TypeError:
         model = SequenceDiff(model=backbone, optimizer=optimizer, collateFunc=collater, AMP=AMP)
         model.DDP = ddp_enabled
 
-    # ========= 4) 开始训练 =========
+
     savePath = "ThermoEDiff"
     model.train(
         trainDataSet=trainDS,

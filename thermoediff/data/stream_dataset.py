@@ -20,22 +20,22 @@ class ParquetStreamPairs(torch.utils.data.IterableDataset):
         return (x < self.split_ratio) if (self.split == "train") else (x >= self.split_ratio)
 
     def __iter__(self):
-        # --- DDP rank/world_size ---
+
         rank, world_size = 0, 1
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             rank = torch.distributed.get_rank()
             world_size = torch.distributed.get_world_size()
 
-        # --- DataLoader worker_id/num_workers ---
+
         wi = get_worker_info()
         worker_id, num_workers = (wi.id, wi.num_workers) if wi is not None else (0, 1)
 
-        # 把 (rank, worker) 合并成一个全局 worker 维度，确保不重复读
+
         global_worker_id = rank * num_workers + worker_id
         global_num_workers = world_size * num_workers
 
         for file_idx, f in enumerate(self.files):
-            # 关键：按文件分片（简单稳妥）。不同 rank/worker 只读自己那一份
+
             if (file_idx % global_num_workers) != global_worker_id:
                 continue
 

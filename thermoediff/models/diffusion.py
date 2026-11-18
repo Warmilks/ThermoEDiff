@@ -1,4 +1,3 @@
-"""Evolution-direction-conditioned residual diffusion model."""
 import numpy as np
 import torch
 from torch import nn
@@ -28,42 +27,41 @@ class AlignDiff(nn.Module):
         self.std = std
 
     def denoise(self, xref, xquery, xt, t):
-        # xref: B,1,C, xquery: B,L,C; xt: B,L,C; t: B,1
+
         qL = xquery.shape[1]
 
-        xseq = torch.cat([xref, xquery, xt], dim=1)  # B,L,C
-        xseq = torch.cat([xseq, t[:, None].repeat(1, xseq.shape[1], 1)], dim=-1)  # B,L,C
+        xseq = torch.cat([xref, xquery, xt], dim=1)
+        xseq = torch.cat([xseq, t[:, None].repeat(1, xseq.shape[1], 1)], dim=-1)
 
-        xseq = self.pos_proj(xseq)  # B,L,H
+        xseq = self.pos_proj(xseq)
 
-        y_logit = self.backbone(xseq)[:, -qL:] + xseq[:, -qL:]  # [...,:-1,:] # + t
+        y_logit = self.backbone(xseq)[:, -qL:] + xseq[:, -qL:]
         y_logit = self.fc_linear(y_logit)
         return {'y_logit': y_logit, 'tkn_pre': self.lm_head(xquery + xt + y_logit * t[..., None])}
 
-    # DL_ClassifierModel.py 里 class AlignDiff 的 forward 替换/修改为这样
 
     def forward(self, data, T=0):
         with torch.no_grad():
-            # 起点永远需要
-            embeddedSeqAArr = self.embedder.esm(**data['tokenizedSeqAArr']).last_hidden_state  # B,L,1280
 
-            # 只有训练才需要终点来构造监督目标 x0
+            embeddedSeqAArr = self.embedder.esm(**data['tokenizedSeqAArr']).last_hidden_state
+
+
             if T == 0:
-                embeddedSeqBArr = self.embedder.esm(**data['tokenizedSeqBArr']).last_hidden_state  # B,L,1280
+                embeddedSeqBArr = self.embedder.esm(**data['tokenizedSeqBArr']).last_hidden_state
 
-        xquery = embeddedSeqAArr  # B,L,C
+        xquery = embeddedSeqAArr
 
-        # ====== 关键：xref 用外部 y，而不是用 B-A 现场算 ======
-        xref = data['tokenizedLabArr'].to(xquery.device)  # (B,1280) or (B,1,1280)
+
+        xref = data['tokenizedLabArr'].to(xquery.device)
         if xref.dim() == 2:
-            xref = xref[:, None, :]  # -> (B,1,1280)
+            xref = xref[:, None, :]
 
         if T == 0:
-            x0 = embeddedSeqBArr - embeddedSeqAArr  # supervise target delta (B,L,1280)
+            x0 = embeddedSeqBArr - embeddedSeqAArr
 
             t = torch.tensor(np.random.uniform(size=(x0.shape[0], 1)),
-                             dtype=torch.float32, device=x0.device)  # (B,1)
-            eps = torch.normal(mean=0, std=self.std, size=x0.shape, device=x0.device)  # (B,L,1280)
+                             dtype=torch.float32, device=x0.device)
+            eps = torch.normal(mean=0, std=self.std, size=x0.shape, device=x0.device)
             xt = (1 - t[..., None]) * x0 + t[..., None] * eps
 
             res = self.denoise(xref, xquery, xt, t)
@@ -71,7 +69,7 @@ class AlignDiff(nn.Module):
             return res
 
         else:
-            # ====== 关键：采样只需要形状，用 xquery.shape 就行 ======
+
             x_noised = torch.normal(mean=0, std=self.std, size=xquery.shape, device=xquery.device)
 
             t_samples = torch.linspace(1, 0, T, device=xquery.device)[:, None, None].repeat(1, xquery.shape[0], 1)
